@@ -493,14 +493,31 @@ window.addEventListener('dblclick', (event) => {
   if (intersects.length > 0) {
     const point = intersects[0].point;
     targetPos.x = point.x;
-    targetPos.y = 7.0; // Stabil təhlükəsiz uçuş hündürlüyü
     targetPos.z = point.z;
+    targetPos.y = event.altKey ? point.y + 0.1 : 7.0; // Alt+double-click yer səviyyəsinə qoyur
 
     targetMesh.position.set(targetPos.x, targetPos.y, targetPos.z);
     targetMesh.visible = true; 
     isTargetSet = true; 
 
-    console.log(`[Ssenari B - Şəhər] Yeni Hədəf Kvartalı: X=${targetPos.x.toFixed(1)}, Z=${targetPos.z.toFixed(1)}`);
+    const placementType = event.altKey ? 'ground' : 'flight';
+    console.log(`[Ssenari B - Şəhər] Yeni Hədəf: X=${targetPos.x.toFixed(1)}, Z=${targetPos.z.toFixed(1)}, Y=${targetPos.y.toFixed(1)} (${placementType})`);
+  }
+});
+
+window.addEventListener('keydown', (event) => {
+  if (!isTargetSet) return;
+
+  const delta = 1.0;
+  if (event.key === 'Shift') {
+    targetPos.y = Math.min(targetPos.y + delta, 40);
+    targetMesh.position.y = targetPos.y;
+    console.log(`Target height increased: Y=${targetPos.y.toFixed(1)}`);
+  }
+  if (event.key === 'Control') {
+    targetPos.y = Math.max(targetPos.y - delta, 0);
+    targetMesh.position.y = targetPos.y;
+    console.log(`Target height decreased: Y=${targetPos.y.toFixed(1)}`);
   }
 });
 
