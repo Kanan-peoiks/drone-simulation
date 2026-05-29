@@ -4,6 +4,285 @@ import * as CANNON from 'cannon-es';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { DroneAgent } from './DroneAgent.js';
 
+// Dinamik Maneələr (Maşınlar və Quşlar) Sinifi
+class DynamicObstacle {
+  constructor(type, startPos, scene, world) {
+    this.type = type; // 'car' və ya 'bird'
+    this.scene = scene;
+    this.world = world;
+    this.position = new THREE.Vector3(startPos.x, startPos.y, startPos.z);
+    this.velocity = new THREE.Vector3();
+    this.time = 0;
+    
+    if (type === 'car') {
+      // Maşın: Yol şəbəkəsində xətti hərəkət
+      this.roadIndex = Math.floor(Math.random() * 4); // Hansı yolda hərəkət edəcəyini seç
+      this.direction = Math.random() > 0.5 ? 1 : -1; // Yolda irəli və ya geri
+      this.speed = 15 + Math.random() * 10; // 15-25 m/s
+      this.roadLength = 160;
+      this.pathType = Math.random() > 0.5 ? 'vertical' : 'horizontal';
+      
+      // Maşın vizual - kabin, gövdə, təkərlər və farlar
+      this.mesh = new THREE.Group();
+      const bodyMat = new THREE.MeshPhongMaterial({ color: new THREE.Color().setHSL(Math.random(), 0.8, 0.45), shininess: 70 });
+      const windowMat = new THREE.MeshPhongMaterial({ color: 0x4488cc, transparent: true, opacity: 0.75 });
+      const wheelMat = new THREE.MeshPhongMaterial({ color: 0x111111, shininess: 10 });
+      const lightMat = new THREE.MeshPhongMaterial({ color: 0xffffaa, emissive: 0xffff88, emissiveIntensity: 0.8 });
+
+      const chassisGeo = new THREE.BoxGeometry(1.5, 0.7, 3);
+      const chassis = new THREE.Mesh(chassisGeo, bodyMat);
+      chassis.position.y = 0.35;
+      chassis.castShadow = true;
+      this.mesh.add(chassis);
+
+      const cabinGeo = new THREE.BoxGeometry(1.2, 0.4, 1.2);
+      const cabin = new THREE.Mesh(cabinGeo, windowMat);
+      cabin.position.set(0, 0.65, 0);
+      cabin.castShadow = true;
+      this.mesh.add(cabin);
+
+      const wheelGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.4, 12);
+      for (let wx of [-0.6, 0.6]) {
+        for (let wz of [-1.0, 1.0]) {
+          const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+          wheel.rotation.z = Math.PI / 2;
+          wheel.position.set(wx, 0.15, wz);
+          wheel.castShadow = true;
+          this.mesh.add(wheel);
+        }
+      }
+
+      const headlightGeo = new THREE.SphereGeometry(0.08, 8, 8);
+      const leftLight = new THREE.Mesh(headlightGeo, lightMat);
+      const rightLight = leftLight.clone();
+      leftLight.position.set(-0.45, 0.4, -1.5);
+      rightLight.position.set(0.45, 0.4, -1.5);
+      this.mesh.add(leftLight, rightLight);
+
+      this.mesh.position.copy(this.position);
+      scene.add(this.mesh);
+      
+      // Cannon.js kinematic body
+      const carShape = new CANNON.Box(new CANNON.Vec3(0.75, 0.35, 1.5));
+      this.body = new CANNON.Body({ mass: 0 }); // Kinematic
+      this.body.addShape(carShape);
+      this.body.position.set(startPos.x, startPos.y, startPos.z);
+      world.addBody(this.body);
+    } 
+    else if (type === 'bird') {
+      // Quş: Havada dairəvi/sinusidal trayektoriya
+      this.centerX = startPos.x;
+      this.centerZ = startPos.z;
+      this.radius = 12 + Math.random() * 18; // 12-30 metrlə
+      this.altitude = 22 + Math.random() * 12; // 22-34 metrlə
+      this.angularVelocity = (Math.random() + 0.6) * 0.35; // Dairə içində hərəkət sürəti
+      this.time = Math.random() * Math.PI * 2;
+      this.subType = startPos.subType || 'gull';
+
+      // Quş vizual - müxtəlif növlər üçün fərqli qanad və bədən forması
+      this.mesh = new THREE.Group();
+      let bodyMat, wingMat, beakMat;
+      if (this.subType === 'gull') {
+        bodyMat = new THREE.MeshPhongMaterial({ color: 0xffffff, shininess: 40 });
+        wingMat = new THREE.MeshPhongMaterial({ color: 0xdddddd, shininess: 10 });
+        beakMat = new THREE.MeshPhongMaterial({ color: 0xffaa00, emissive: 0xee8800 });
+      } else {
+        bodyMat = new THREE.MeshPhongMaterial({ color: 0x999999, shininess: 40 });
+        wingMat = new THREE.MeshPhongMaterial({ color: 0x555555, shininess: 10 });
+        beakMat = new THREE.MeshPhongMaterial({ color: 0xffcc66, emissive: 0xddaa55 });
+      }
+
+      const bodyGeo = this.subType === 'gull'
+        ? new THREE.SphereGeometry(0.45, 16, 16)
+        : new THREE.OctahedronGeometry(0.45, 0);
+      const body = new THREE.Mesh(bodyGeo, bodyMat);
+      body.castShadow = true;
+      this.mesh.add(body);
+
+      const wingGeo = this.subType === 'gull'
+        ? new THREE.BoxGeometry(1.2, 0.08, 0.4)
+        : new THREE.BoxGeometry(1.6, 0.08, 0.3);
+      this.wingLeft = new THREE.Mesh(wingGeo, wingMat);
+      this.wingRight = this.wingLeft.clone();
+      this.wingLeft.position.set(-0.75, 0, 0);
+      this.wingRight.position.set(0.75, 0, 0);
+      this.wingLeft.rotation.z = this.subType === 'gull' ? 0.2 : 0.3;
+      this.wingRight.rotation.z = this.subType === 'gull' ? -0.2 : -0.3;
+      this.mesh.add(this.wingLeft, this.wingRight);
+
+      const beakGeo = new THREE.ConeGeometry(0.12, 0.35, 10);
+      const beak = new THREE.Mesh(beakGeo, beakMat);
+      beak.rotation.x = Math.PI / 2;
+      beak.position.set(0, 0, 0.55);
+      this.mesh.add(beak);
+
+      const eyeGeo = new THREE.SphereGeometry(0.06, 8, 8);
+      const eyeMat = new THREE.MeshBasicMaterial({ color: 0x111111 });
+      const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
+      const rightEye = leftEye.clone();
+      leftEye.position.set(-0.18, 0.18, 0.35);
+      rightEye.position.set(0.18, 0.18, 0.35);
+      this.mesh.add(leftEye, rightEye);
+
+      if (this.subType === 'swift') {
+        const tailGeo = new THREE.ConeGeometry(0.15, 0.4, 8);
+        const tail = new THREE.Mesh(tailGeo, bodyMat);
+        tail.rotation.x = -Math.PI / 2;
+        tail.position.set(0, 0, -0.4);
+        this.mesh.add(tail);
+      }
+
+      this.mesh.position.copy(this.position);
+      scene.add(this.mesh);
+      
+      // Cannon.js kinematic body
+      const birdShape = new CANNON.Sphere(0.5);
+      this.body = new CANNON.Body({ mass: 0 }); // Kinematic
+      this.body.addShape(birdShape);
+      this.body.position.set(startPos.x, startPos.y, startPos.z);
+      world.addBody(this.body);
+    } 
+    else if (type === 'plane') {
+      // Təyyarə: yuxarıdan keçir və sonra müəyyən vaxt sonra yenidən daxil olur
+      this.active = false;
+      this.waitTime = startPos.startDelay || 4.0;
+      this.planeDirection = startPos.direction || 1;
+      this.startAltitude = startPos.altitude || 40;
+      this.flightZ = startPos.flightZ || -15;
+      this.speed = 40 + Math.random() * 15;
+      this.time = 0;
+
+      this.mesh = new THREE.Group();
+      const bodyMat = new THREE.MeshPhongMaterial({ color: 0x4444aa, shininess: 80, emissive: 0x112266, emissiveIntensity: 0.1 });
+      const wingMat = new THREE.MeshPhongMaterial({ color: 0xeeeeee, shininess: 20 });
+      const cockpitMat = new THREE.MeshPhongMaterial({ color: 0x222222, transparent: true, opacity: 0.7 });
+
+      const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.6, 5, 16), bodyMat);
+      fuselage.rotation.z = Math.PI / 2;
+      fuselage.castShadow = true;
+      this.mesh.add(fuselage);
+
+      const wing = new THREE.Mesh(new THREE.BoxGeometry(6, 0.1, 1.2), wingMat);
+      wing.position.set(0, 0, 0);
+      wing.castShadow = true;
+      this.mesh.add(wing);
+
+      const tail = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.2, 0.5), wingMat);
+      tail.position.set(-2.2, 0.35, 0);
+      tail.rotation.y = Math.PI / 12;
+      this.mesh.add(tail);
+
+      const cockpit = new THREE.Mesh(new THREE.SphereGeometry(0.35, 16, 16), cockpitMat);
+      cockpit.position.set(1.2, 0.2, 0);
+      this.mesh.add(cockpit);
+
+      const engine = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 1.0, 12), new THREE.MeshPhongMaterial({ color: 0x333333 }));
+      engine.rotation.z = Math.PI / 2;
+      engine.position.set(2.5, 0, 0);
+      this.mesh.add(engine);
+
+      scene.add(this.mesh);
+
+      const planeShape = new CANNON.Box(new CANNON.Vec3(2.5, 0.3, 0.6));
+      this.body = new CANNON.Body({ mass: 0 });
+      this.body.addShape(planeShape);
+      this.body.position.set(0, this.startAltitude, this.flightZ);
+      world.addBody(this.body);
+    }
+  }
+  
+  update(dt) {
+    const roadPositions = [-30, -10, 10, 30];
+    
+    if (this.type === 'car') {
+      if (this.pathType === 'vertical') {
+        // X-Y sabitdir, Z-də hərəkət
+        this.position.x = roadPositions[this.roadIndex];
+        this.position.z += this.direction * this.speed * dt;
+        
+        // Sona çatdıqda başlanğıca qay
+        if (this.position.z > this.roadLength / 2) {
+          this.position.z = -this.roadLength / 2;
+        } else if (this.position.z < -this.roadLength / 2) {
+          this.position.z = this.roadLength / 2;
+        }
+        
+        this.velocity.set(0, 0, this.direction * this.speed);
+      } else {
+        // Z sabitdir, X-də hərəkət
+        this.position.z = roadPositions[this.roadIndex];
+        this.position.x += this.direction * this.speed * dt;
+        
+        if (this.position.x > this.roadLength / 2) {
+          this.position.x = -this.roadLength / 2;
+        } else if (this.position.x < -this.roadLength / 2) {
+          this.position.x = this.roadLength / 2;
+        }
+        
+        this.velocity.set(this.direction * this.speed, 0, 0);
+      }
+      this.position.y = 0.5;
+    } 
+    else if (this.type === 'bird') {
+      // Dairəvi trayektoriya
+      this.time += this.angularVelocity * dt;
+      this.position.x = this.centerX + Math.cos(this.time) * this.radius;
+      this.position.z = this.centerZ + Math.sin(this.time) * this.radius;
+      this.position.y = this.altitude + Math.sin(this.time * 2) * 2.5; // Sinusidal hündürlük dəyişikliyi
+      
+      // Sürət vektoru (dairəvi hərəkət)
+      this.velocity.x = -Math.sin(this.time) * this.radius * this.angularVelocity;
+      this.velocity.z = Math.cos(this.time) * this.radius * this.angularVelocity;
+      this.velocity.y = Math.cos(this.time * 2) * 2.5 * 2 * this.angularVelocity;
+    }
+    else if (this.type === 'plane') {
+      this.time += dt;
+      if (!this.active) {
+        this.waitTime -= dt;
+        if (this.waitTime <= 0) {
+          this.active = true;
+          this.position.y = this.startAltitude;
+          this.position.z = this.flightZ;
+          this.position.x = this.planeDirection === 1 ? -110 : 110;
+          this.velocity.set(this.speed * this.planeDirection, 0, 0);
+        }
+      } else {
+        // Yuxarıdan hərəkət edən uçuş
+        this.position.addScaledVector(this.velocity, dt);
+        this.position.y = this.startAltitude + Math.sin(this.time * 1.5) * 1.5;
+        this.position.z = this.flightZ + Math.sin(this.time * 0.5) * 2;
+
+        if (Math.abs(this.position.x) > 110) {
+          this.active = false;
+          this.waitTime = 8 + Math.random() * 6;
+          this.velocity.set(0, 0, 0);
+          this.position.y = -50;
+        }
+      }
+    }
+    
+    // Mesh və body pozisiyasını yenilə
+    this.mesh.position.copy(this.position);
+    this.body.position.set(this.position.x, this.position.y, this.position.z);
+    this.body.velocity.set(this.velocity.x, this.velocity.y, this.velocity.z);
+
+    if (this.type === 'car') {
+      if (this.pathType === 'vertical') {
+        this.mesh.rotation.y = this.direction === 1 ? 0 : Math.PI;
+      } else {
+        this.mesh.rotation.y = this.direction === 1 ? Math.PI / 2 : -Math.PI / 2;
+      }
+    } else if (this.type === 'bird') {
+      const flap = Math.sin(this.time * 10) * 0.35;
+      if (this.wingLeft && this.wingRight) {
+        this.wingLeft.rotation.z = 0.2 + flap;
+        this.wingRight.rotation.z = -0.2 - flap;
+      }
+      this.mesh.rotation.y = Math.atan2(this.velocity.x, this.velocity.z);
+    }
+  }
+}
+
 // 1. SƏHNƏ VƏ MAVİ GÖY ÜZÜ
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x88ccee); 
@@ -162,6 +441,44 @@ for (let i = 0; i < 2; i++) {
   drones.push(drone);
 }
 
+// 7.5 DİNAMİK MANEƏLƏR (Ssenari C: Maşınlar və Quşlar)
+const dynamicObstacles = [];
+
+// Maşınları yollar üzərində yerləş
+for (let i = 0; i < 4; i++) {
+  const roadPositions = [-30, -10, 10, 30];
+  const isVertical = i % 2 === 0;
+  const roadPos = roadPositions[Math.floor(i / 2)];
+  
+  const carStart = isVertical 
+    ? { x: roadPos, y: 0.5, z: -70 + i * 35 }
+    : { x: -70 + i * 35, y: 0.5, z: roadPos };
+  
+  const car = new DynamicObstacle('car', carStart, scene, world);
+  dynamicObstacles.push(car);
+}
+
+// Quşları şəhər üzərində yerləş
+for (let i = 0; i < 5; i++) {
+  const birdStart = {
+    x: -42 + i * 21,
+    y: 28 + (i % 2) * 2,
+    z: -24 + (i % 3) * 18,
+    subType: i % 2 === 0 ? 'gull' : 'swift'
+  };
+  const bird = new DynamicObstacle('bird', birdStart, scene, world);
+  dynamicObstacles.push(bird);
+}
+
+// Təyyarə: yuxarıdan daxil olub uçan və sonra müəyyən vaxtdan sonra təkrar gələn obyekt
+const airliner = new DynamicObstacle('plane', {
+  startDelay: 3.5,
+  direction: Math.random() > 0.5 ? 1 : -1,
+  altitude: 36 + Math.random() * 6,
+  flightZ: -12
+}, scene, world);
+dynamicObstacles.push(airliner);
+
 // 8. İKİQAT KLİKLƏ HƏDƏF SEÇİMİ
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
@@ -195,14 +512,19 @@ async function animate() {
 
   controls.update();
   world.step(timeStep);
+  
+  // Dinamik maneələri yenilə
+  for (const dynObs of dynamicObstacles) {
+    dynObs.update(timeStep);
+  }
 
   for (const drone of drones) {
-    const oldState = drone.getState(targetPos, obstacleBodies);
-    drone.update(timeStep, targetPos, isTargetSet, drones, obstacleBodies); 
+    const oldState = drone.getState(targetPos, obstacleBodies, dynamicObstacles);
+    drone.update(timeStep, targetPos, isTargetSet, drones, obstacleBodies, dynamicObstacles); 
 
     if (isTargetSet) {
       const currentAction = drone.lastAction;
-      const reward = drone.calculateReward(targetPos, drones, obstacleBodies);
+      const reward = drone.calculateReward(targetPos, drones, obstacleBodies, dynamicObstacles);
       await drone.trainStep(oldState, currentAction, reward);
     }
   }

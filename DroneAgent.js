@@ -63,8 +63,8 @@ export class DroneAgent {
     this.body.linearDamping = 0.95; 
     world.addBody(this.body);
 
-    // 3. SSENARİ B ÜÇÜN 12 GİRİŞLİ NEURAL NETWORK (Giriş Ölçüsü Genişləndirildi)
-    const inputSize = 12; 
+    // 3. SSENARİ C ÜÇÜN 15 GİRİŞLİ NEURAL NETWORK (Dinamik Maneələr Əlavə Edildi)
+    const inputSize = 15; 
     this.model = tf.sequential();
     this.model.add(tf.layers.dense({ units: 48, activation: 'relu', inputShape: [inputSize] }));
     this.model.add(tf.layers.dense({ units: 24, activation: 'relu' }));
@@ -74,13 +74,13 @@ export class DroneAgent {
     this.model.compile({ optimizer: this.optimizer, loss: 'meanSquaredError' });
   }
 
-  // Yenilənmiş Dövlət Metodu: Ən yaxın binanı və ona olan məsafəni hesablayan sensor
-  getState(targetPos, obstacles = []) {
+  // Yenilənmiş Dövlət Metodu: Ən yaxın STATİK binanı, DİNAMİK maneəni hesablayan sensor (15 input)
+  getState(targetPos, obstacles = [], dynamicObstacles = []) {
     const dx = targetPos.x - this.body.position.x;
     const dy = targetPos.y - this.body.position.y;
     const dz = targetPos.z - this.body.position.z;
 
-    // Ən yaxın binanı tapmaq üçün skan alqoritmi
+    // Ən yaxın STATİK binanı tapmaq
     let closestObs = null;
     let minDist = 9999;
     obstacles.forEach(obs => {
@@ -91,20 +91,35 @@ export class DroneAgent {
       }
     });
 
-    // Nisbi koordinat fərqləri (Sensor çıxışları)
     const obsDx = closestObs ? closestObs.position.x - this.body.position.x : 0;
     const obsDy = closestObs ? closestObs.position.y - this.body.position.y : 0;
     const obsDz = closestObs ? closestObs.position.z - this.body.position.z : 0;
+
+    // Ən yaxın DİNAMİK maneəni tapmaq (maşın v ya quş)
+    let closestDynObs = null;
+    let minDynDist = 9999;
+    dynamicObstacles.forEach(dynObs => {
+      const dist = this.body.position.distanceTo(dynObs.position);
+      if (dist < minDynDist) {
+        minDynDist = dist;
+        closestDynObs = dynObs;
+      }
+    });
+
+    const dynDx = closestDynObs ? closestDynObs.position.x - this.body.position.x : 0;
+    const dynDy = closestDynObs ? closestDynObs.position.y - this.body.position.y : 0;
+    const dynDz = closestDynObs ? closestDynObs.position.z - this.body.position.z : 0;
 
     return [
       this.body.position.x, this.body.position.y, this.body.position.z,
       this.body.velocity.x, this.body.velocity.y, this.body.velocity.z,
       dx, dy, dz,
-      obsDx, obsDy, obsDz // Son 3 Yeni komponent (Sensor məlumatları)
+      obsDx, obsDy, obsDz,        // STATİK maneə məsafəsi (9-11)
+      dynDx, dynDy, dynDz         // DİNAMİK maneə məsafəsi (12-14)
     ];
   }
 
-  update(dt, targetPos, isTargetSet, allDrones = [], obstacles = []) {
+  update(dt, targetPos, isTargetSet, allDrones = [], obstacles = [], dynamicObstacles = []) {
     const targetVec = new CANNON.Vec3(targetPos.x, targetPos.y, targetPos.z);
 
     if (!isTargetSet) {
@@ -167,8 +182,8 @@ export class DroneAgent {
       this.lastAction = [0, 0, 0];
       if (this.propellers) this.propellers.forEach(prop => { prop.rotation.y += 0.15; });
     } else {
-      // 12 Girişli şəbəkədən proqnozun alınması
-      const currentState = this.getState(targetPos, obstacles);
+      // 15 Girişli şəbəkədən proqnozun alınması
+      const currentState = this.getState(targetPos, obstacles, dynamicObstacles);
       const stateTensor = tf.tensor2d([currentState], [1, currentState.length]);
       const actionTensor = this.model.predict(stateTensor);
       const action = actionTensor.dataSync(); 
@@ -178,22 +193,37 @@ export class DroneAgent {
 
       this.lastAction = [action[0], action[1], action[2]];
 
-      // POTENSİAL SAHƏLƏR METODU (Maneə İtələmə Mexanizmi)
+      // POTENSİAL SAHƏLƏR METODU (Statik Maneə İtələmə)
       let avoidForceX = 0;
       let avoidForceZ = 0;
       let avoidForceY = 0;
 
+      // STATİK maneələrdən yayınma
       obstacles.forEach(obs => {
         const dist = this.body.position.distanceTo(obs.position);
-        if (dist < 3.5) { // 3.5 metrdən etibarən binanı hiss et və qaç
+        if (dist < 3.5) {
           const forceMagnitude = (3.5 - dist) * 12.0;
-          // Binadan kənara doğru itələmə vektoru
           avoidForceX += ((this.body.position.x - obs.position.x) / dist) * forceMagnitude;
           avoidForceZ += ((this.body.position.z - obs.position.z) / dist) * forceMagnitude;
-          // Əgər bina çox hündürdürsə, dron yuxarıya doğru da manevr edə bilsin
           if (this.body.position.y < obs.position.y + 2) {
             avoidForceY += forceMagnitude * 1.5;
           }
+        }
+      });
+
+      // DİNAMİK maneələrdən yayınma (Ssenari C)
+      dynamicObstacles.forEach(dynObs => {
+        const dist = this.body.position.distanceTo(dynObs.position);
+        if (dist < 4.0) { // 4 metrdən yaxınlaşdıqda tepki göstər
+          const forceMagnitude = (4.0 - dist) * 15.0; // Biraz daha güclü
+          // Dinamik maneədən uzaqlaş
+          avoidForceX += ((this.body.position.x - dynObs.position.x) / dist) * forceMagnitude;
+          avoidForceZ += ((this.body.position.z - dynObs.position.z) / dist) * forceMagnitude;
+          
+          // Dinamik maneənin hərəkət vektorunu nəzərə al (predictive avoidance)
+          avoidForceX -= dynObs.velocity.x * 0.5;
+          avoidForceZ -= dynObs.velocity.z * 0.5;
+          avoidForceY += dynObs.velocity.y * 0.3;
         }
       });
 
@@ -222,14 +252,15 @@ export class DroneAgent {
     this.mesh.quaternion.copy(this.body.quaternion);
   }
 
-  // Toqquşmadan yayınma və Bina Cəriməsi ilə zənginləşdirilmiş Mükafat Funksiyası
-  calculateReward(targetPos, allDrones, obstacles = []) {
+  // Dinamik Maneələr Cəriməsi ilə zənginləşdirilmiş Mükafat Funksiyası (Ssenari C)
+  calculateReward(targetPos, allDrones, obstacles = [], dynamicObstacles = []) {
     const currentDistToGoal = this.body.position.distanceTo(new CANNON.Vec3(targetPos.x, targetPos.y, targetPos.z));
     
     let Rg = 0; 
     let Rf = 0; 
     let Rc = 0; 
-    let Ro = 0; // Ssenari B-nin Bina Cəriməsi
+    let Ro = 0; // Statik bina cəriməsi
+    let Rd = 0; // Dinamik maneə cəriməsi (Ssenari C)
 
     // Hədəf mükafatı
     if (currentDistToGoal < 2.2) {
@@ -239,11 +270,19 @@ export class DroneAgent {
       Rg = -currentDistToGoal * 25; 
     }
 
-    // BİNALARA TOQQUŞMA CƏRİMƏSİ (Məqsəd 3)
+    // STATİK BİNALARA TOQQUŞMA CƏRİMƏSİ
     obstacles.forEach(obs => {
       const dist = this.body.position.distanceTo(obs.position);
       if (dist < 1.8) {
-        Ro -= 900; // Sərt cərimə modelə binalardan yayınmağı mükəmməl öyrədir
+        Ro -= 900;
+      }
+    });
+
+    // DİNAMİK MANEƏLƏRƏ TOQQUŞMA CƏRİMƏSİ (Ssenari C - Məqsəd 3)
+    dynamicObstacles.forEach(dynObs => {
+      const dist = this.body.position.distanceTo(dynObs.position);
+      if (dist < 1.5) {
+        Rd -= 1000; // Sərt cərimə: Maşın ya quşla toqquşma fəlakətlidir
       }
     });
 
@@ -264,7 +303,7 @@ export class DroneAgent {
       }
     }
 
-    return Rg + Rf + Rc + Ro;
+    return Rg + Rf + Rc + Ro + Rd;
   }
 
   async trainStep(state, action, reward) {
