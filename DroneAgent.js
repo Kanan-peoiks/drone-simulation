@@ -1,65 +1,129 @@
 // DroneAgent.js
 import * as CANNON from 'cannon-es';
 import * as THREE from 'three';
+import * as tf from '@tensorflow/tfjs';
 
 export class DroneAgent {
-  /**
-   * @param {THREE.Scene} scene - Three.js səhnəsi
-   * @param {CANNON.World} world - Cannon.js fizika dünyası
-   * @param {Object} options - Dronun konfiqurasiyası
-   *   shape: 'box' | 'sphere'            // Gövdənin növü
-   *   size: Number                      // Ölçü vahidi (metr cinsindən)
-   *   mass: Number                      // Kütlə (kg)
-   *   color: 0x____                     // Mesh rəngi (hex)
-   */
-  constructor(scene, world, options = {}) {
-    const { shape = 'box', size = 1, mass = 1, color = 0x00ff00 } = options;
+  constructor(id, startPos, bodyType, size, mass, color, scene, world, sensorConfig = { numRays: 8, maxDistance: 20 }) {
+    this.id = id;
+    this.scene = scene;
+    this.sensorConfig = sensorConfig;
 
-    // Fizika gövdəsinin forması və Cannon.Shape yaradılması:
-    if (shape === 'box') {
-      // Kutu forması: ölçülərin yarısı (halfExtents) tələb olunur:
-      const halfExtents = new CANNON.Vec3(size/2, size/2, size/2);
-      const boxShape = new CANNON.Box(halfExtents);
-      this.body = new CANNON.Body({ mass: mass });
-      this.body.addShape(boxShape);
-      // Mesh: Three.js-də uyğun ölçülü qutu geometrisi:
-      const geometry = new THREE.BoxGeometry(size, size, size);
-      const material = new THREE.MeshLambertMaterial({ color: color });
-      this.mesh = new THREE.Mesh(geometry, material);
-    } else if (shape === 'sphere') {
-      // Sfera forması: radius (size/2 kimi götürək):
-      const radius = size/2;
-      const sphereShape = new CANNON.Sphere(radius);
-      this.body = new CANNON.Body({ mass: mass });
-      this.body.addShape(sphereShape);
-      // Mesh: Three.js sfera
-      const geometry = new THREE.SphereGeometry(radius, 16, 16);
-      const material = new THREE.MeshLambertMaterial({ color: color });
-      this.mesh = new THREE.Mesh(geometry, material);
-    }
-
-    // Başlanğıc mövqe (fərziyyə): dronları bir qədər aralayırıq
-    this.body.position.set(Math.random()*2, 1 + Math.random()*0.5, Math.random()*2);
-    // Dəyişənlərin başlanğıc dəyərləri:
-    this.body.angularDamping = 0.5;  // açısal sönüm
-    this.body.linearDamping = 0.2;   // xətlə sönüm
-
-    // World və scene obyektlərinə əlavə:
-    world.addBody(this.body);
+    // 1. Three.js Mesh Yaradılması (Vizual)
+    let geometry = (bodyType === 'box')
+        ? new THREE.BoxGeometry(size, size, size)
+        : new THREE.SphereGeometry(size / 2, 16, 16); // radius = size/2
+    let material = new THREE.MeshPhongMaterial({ color });
+    this.mesh = new THREE.Mesh(geometry, material);
     scene.add(this.mesh);
+
+    // 2. Cannon.js Gövdə Yaradılması (Fizika)
+    let shape = (bodyType === 'box')
+        ? new CANNON.Box(new CANNON.Vec3(size / 2, size / 2, size / 2))
+        : new CANNON.Sphere(size / 2);
+    this.body = new CANNON.Body({ mass: mass });
+    this.body.addShape(shape);
+    this.body.position.set(startPos.x, startPos.y, startPos.z);
+    
+    // Sürtünmələri əlavə edək ki, havada idarəsiz fırlanmasınlar
+    this.body.angularDamping = 0.7;
+    this.body.linearDamping = 0.4;
+    world.addBody(this.body);
+
+    // 3. TensorFlow.js ilə MLP Modelinin Qurulması (Beyin)
+    // Giriş: Mövqe(3) + Sürət(3) + Sensor şüaları(8) = 14
+    const inputSize = 3 + 3 + this.sensorConfig.numRays; 
+    const hiddenSize1 = 32;
+    const hiddenSize2 = 16;
+    const outputSize = 2; // [thrust, rotation]
+
+    this.model = tf.sequential();
+    this.model.add(tf.layers.dense({ units: hiddenSize1, activation: 'relu', inputShape: [inputSize] }));
+    this.model.add(tf.layers.dense({ units: hiddenSize2, activation: 'relu' }));
+    this.model.add(tf.layers.dense({ units: outputSize, activation: 'tanh' })); // Çıxış [-1, 1] aralığında olacaq
+
+    // Təlim üçün optimizator (Bunu növbəti addımda istifadə edəcəyik)
+    this.optimizer = tf.train.adam();
+    this.model.compile({
+      optimizer: this.optimizer,
+      loss: 'meanSquaredError'
+    });
+
+    // Raycaster sensor obyekti
+    this.raycaster = new THREE.Raycaster();
   }
 
-  /** Fizika addımından sonra mesh transformunu güncəlləyir */
-  update(deltaTime) {
-    // (Məsələn, burada sabit thrust və yaw tətbiq oluna bilər)
-    // *** Qeyd: Faktiki uçuş idarəsi bu misalda optimallaşdırılmayıb *** 
+  // Virtual sensorlardan və koordinatlardan cari "Vəziyyət Vektoru"nu (State) alırıq
+  getState() {
+    const stateArray = [];
 
-    // İtələmə qüvvəsi nümunəsi (məsələn, hər zaman yuxarı doğru sabit thrust):
-    // const thrustForce = 10;
-    // this.body.applyLocalForce(new CANNON.Vec3(0, thrustForce, 0), new CANNON.Vec3(0,0,0));
+    // 1. Dronun cari mövqeyi (X, Y, Z)
+    stateArray.push(this.body.position.x, this.body.position.y, this.body.position.z);
 
-    // Mesh-in mövqeyini və rotasiyasını bədənlə sinxronlaşdır:
+    // 2. Dronun sürəti (Vx, Vy, Vz)
+    stateArray.push(this.body.velocity.x, this.body.velocity.y, this.body.velocity.z);
+
+    // 3. 360 dərəcəlik Ray-casting sensor məlumatları
+    const rayDistances = [];
+    for (let i = 0; i < this.sensorConfig.numRays; i++) {
+      const angle = (i / this.sensorConfig.numRays) * 2 * Math.PI;
+      // Şüanın yönü
+      const dir = new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
+      
+      this.raycaster.set(this.mesh.position, dir);
+      
+      // Səhnədəki digər obyektlərlə kəsişməni yoxla (dron özünü vurmasın deyə bu mesh-i çıxmaq olar, indilik hamısını yoxlayır)
+      const intersects = this.raycaster.intersectObjects(this.scene.children, true);
+      
+      // Əgər maneə varsa məsafəni yaz, yoxdursa maksimum görmə məsafəsini (20) qəbul et
+      const dist = intersects.length ? intersects[0].distance : this.sensorConfig.maxDistance;
+      rayDistances.push(dist);
+    }
+
+    // Sensor məlumatlarını dövlət vektoruna əlavə et
+    return stateArray.concat(rayDistances);
+  }
+
+  // Hər kadrda dronun hərəkətini təyin edən yeniləmə metodu
+  update(dt) {
+    // 1. Cari vəziyyəti al və Tensor formasına sal
+    const currentState = this.getState();
+    const stateTensor = tf.tensor2d([currentState], [1, currentState.length]);
+
+    // 2. Modeldən qərar (Action) çıxar: [thrust, rotation]
+    const actionTensor = this.model.predict(stateTensor);
+    const action = actionTensor.dataSync(); // Array formatına çevir
+
+    // Tensorları yaddaşda yer tutmasın deyə təmizləyirik
+    stateTensor.dispose();
+    actionTensor.dispose();
+
+    // 3. Qərara əsasən fiziki qüvvə tətbiq et
+    // Thrust: Lokal Y (yuxarı) oxuna güc tətbiq et (Məsələn maksimum 25 Nyuton qüvvə)
+    const up = new CANNON.Vec3(0, 1, 0);
+    const thrustScale = (action[0] + 1) * 12.5; // [-1, 1] aralığını [0, 25] aralığına gətiririk ki, dron aşağı uçmasın, sadəcə thrust azalsın
+    this.body.applyLocalForce(up.scale(thrustScale), new CANNON.Vec3(0, 0, 0));
+
+    // Rotasiya: Y oxu ətrafında dönmə momentini tənzimlə (Zəhmət olmasa diqqət yetir, fırlanma üçün torque.y daha uyğundur)
+    this.body.torque.y += action[1] * 2;
+
+    // 4. Fizika nəticəsini vizual Mesh üzərinə köçür
     this.mesh.position.copy(this.body.position);
     this.mesh.quaternion.copy(this.body.quaternion);
+  }
+
+  // Təlim şablonu (Gələcəkdə mükafat funksiyası ilə işləyəcək)
+  async trainStep(state, action, reward, nextState, done) {
+    const stateTensor = tf.tensor2d([state], [1, state.length]);
+    const nextStateTensor = tf.tensor2d([nextState], [1, nextState.length]);
+    
+    this.optimizer.minimize(() => {
+       // Bu hissə Fəsil 2.4-də (Mükafat funksiyası inteqrasiyasında) yazılacaq
+       // İndilik sadəcə şablon olaraq qalır
+       return tf.scalar(0); 
+    });
+
+    stateTensor.dispose();
+    nextStateTensor.dispose();
   }
 }
