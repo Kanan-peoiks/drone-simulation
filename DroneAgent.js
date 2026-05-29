@@ -9,7 +9,7 @@ export class DroneAgent {
     this.scene = scene;
     this.lastAction = [0, 0, 0];
 
-    // 1. THREE.JS REAL DRON MODELİ
+    // 1. Ssenari A-dakı Orijinal Saf 3D Mühəndislik Modeli (Tam Qorunub)
     this.mesh = new THREE.Group();
     
     const coreGeo = new THREE.CylinderGeometry(0.25, 0.25, 0.12, 8);
@@ -53,7 +53,7 @@ export class DroneAgent {
 
     scene.add(this.mesh);
 
-    // 2. CANNON.JS FİZİKASI
+    // 2. Cannon.js Fiziki Gövdə Tənzimləmələri
     const shape = new CANNON.Box(new CANNON.Vec3(0.3, 0.1, 0.3));
     this.body = new CANNON.Body({ mass: 1.0 });
     this.body.addShape(shape);
@@ -63,35 +63,52 @@ export class DroneAgent {
     this.body.linearDamping = 0.95; 
     world.addBody(this.body);
 
-    // 3. TENSORFLOW.JS MODELİ
-    const inputSize = 9; 
+    // 3. SSENARİ B ÜÇÜN 12 GİRİŞLİ NEURAL NETWORK (Giriş Ölçüsü Genişləndirildi)
+    const inputSize = 12; 
     this.model = tf.sequential();
-    this.model.add(tf.layers.dense({ units: 32, activation: 'relu', inputShape: [inputSize] }));
-    this.model.add(tf.layers.dense({ units: 16, activation: 'relu' }));
+    this.model.add(tf.layers.dense({ units: 48, activation: 'relu', inputShape: [inputSize] }));
+    this.model.add(tf.layers.dense({ units: 24, activation: 'relu' }));
     this.model.add(tf.layers.dense({ units: 3, activation: 'tanh' }));
 
-    this.optimizer = tf.train.adam(0.005);
+    this.optimizer = tf.train.adam(0.004);
     this.model.compile({ optimizer: this.optimizer, loss: 'meanSquaredError' });
   }
 
-  getState(targetPos) {
+  // Yenilənmiş Dövlət Metodu: Ən yaxın binanı və ona olan məsafəni hesablayan sensor
+  getState(targetPos, obstacles = []) {
     const dx = targetPos.x - this.body.position.x;
     const dy = targetPos.y - this.body.position.y;
     const dz = targetPos.z - this.body.position.z;
 
+    // Ən yaxın binanı tapmaq üçün skan alqoritmi
+    let closestObs = null;
+    let minDist = 9999;
+    obstacles.forEach(obs => {
+      const dist = this.body.position.distanceTo(obs.position);
+      if (dist < minDist) {
+        minDist = dist;
+        closestObs = obs;
+      }
+    });
+
+    // Nisbi koordinat fərqləri (Sensor çıxışları)
+    const obsDx = closestObs ? closestObs.position.x - this.body.position.x : 0;
+    const obsDy = closestObs ? closestObs.position.y - this.body.position.y : 0;
+    const obsDz = closestObs ? closestObs.position.z - this.body.position.z : 0;
+
     return [
       this.body.position.x, this.body.position.y, this.body.position.z,
       this.body.velocity.x, this.body.velocity.y, this.body.velocity.z,
-      dx, dy, dz
+      dx, dy, dz,
+      obsDx, obsDy, obsDz // Son 3 Yeni komponent (Sensor məlumatları)
     ];
   }
 
-  update(dt, targetPos, isTargetSet, allDrones = []) {
+  update(dt, targetPos, isTargetSet, allDrones = [], obstacles = []) {
     const targetVec = new CANNON.Vec3(targetPos.x, targetPos.y, targetPos.z);
-    const currentDistToGoal = this.body.position.distanceTo(targetVec);
 
     if (!isTargetSet) {
-      // HOVER REJİMİ (Hədəf yoxdursa)
+      // HOVER REJİMİ (Hədəf seçilməyibsə mövqeyi saxla)
       const antiGravity = 1.0 * 9.82; 
       const brakeX = -this.body.velocity.x * 15;
       const brakeZ = -this.body.velocity.z * 15;
@@ -100,23 +117,22 @@ export class DroneAgent {
       this.body.velocity.set(this.body.velocity.x * 0.8, this.body.velocity.y * 0.8, this.body.velocity.z * 0.8);
       this.lastAction = [0, 0, 0];
       if (this.propellers) this.propellers.forEach(prop => { prop.rotation.y += 0.15; });
+      this.mesh.position.copy(this.body.position);
+      this.mesh.quaternion.copy(this.body.quaternion);
       return;
     }
 
-    // Əgər hədəf varsa, digər dronun mövqeyinə əsasən optimal əks hədəf nöqtəsi (Desire Position) hesablayaq
+    // Orijinal Formasiya və 180 dərəbəlik üzbəüz nizamlanma koordinat hesablanması
     let desiredX = targetPos.x;
     let desiredZ = targetPos.z;
-    const offsetDistance = 2.0; // Hədəfdən durulacaq ideal məsafə (radius)
+    const offsetDistance = 2.0; 
 
     const otherDrone = allDrones.find(d => d.id !== this.id);
-    
     if (otherDrone) {
       if (this.id === 'drone_0') {
-        // Drone 0 (Mavi) üçün istiqamət: Narıncının hədəfə nəzərən tam əks nöqtəsi
         const dirToOther = new THREE.Vector3().subVectors(otherDrone.body.position, targetVec).setY(0);
         if (dirToOther.length() > 0.1) {
           dirToOther.normalize();
-          // Tam əks istiqamətdə nöqtə təyin edirik
           desiredX = targetPos.x - dirToOther.x * offsetDistance;
           desiredZ = targetPos.z - dirToOther.z * offsetDistance;
         } else {
@@ -124,7 +140,6 @@ export class DroneAgent {
           desiredZ = targetPos.z;
         }
       } else {
-        // Drone 1 (Narıncı) birbaşa hədəfin müəyyən bir tərəfinə (məsələn, sağ tərəfə) nizamlanır
         const dirToOther = new THREE.Vector3().subVectors(this.body.position, targetVec).setY(0);
         if (dirToOther.length() > 0.1) {
           dirToOther.normalize();
@@ -137,12 +152,11 @@ export class DroneAgent {
       }
     }
 
-    // İndiki vəziyyətdən bizim riyazi hesabladığımız "üzbəüz ideal nöqtəyə" olan məsafə
     const distToDesired = Math.sqrt(Math.pow(desiredX - this.body.position.x, 2) + Math.pow(desiredZ - this.body.position.z, 2));
     const distToY = Math.abs(targetPos.y - this.body.position.y);
 
-    // Əgər dron hədəf ətrafındakı öz KƏSİŞMƏ NÖQTƏSİNƏ tam çatıbsa, orada qıfıllansın
     if (distToDesired < 0.2 && distToY < 0.2) {
+      // Hədəf nöqtədə stabilləşmə (Əyləcləmə)
       const antiGravity = 1.0 * 9.82; 
       const brakeX = -this.body.velocity.x * 18;
       const brakeZ = -this.body.velocity.z * 18;
@@ -151,11 +165,10 @@ export class DroneAgent {
       this.body.force.set(brakeX, antiGravity + brakeY, brakeZ);
       this.body.velocity.set(this.body.velocity.x * 0.75, this.body.velocity.y * 0.75, this.body.velocity.z * 0.75);
       this.lastAction = [0, 0, 0];
-
       if (this.propellers) this.propellers.forEach(prop => { prop.rotation.y += 0.15; });
     } else {
-      // HƏDƏFƏ VƏ ÜZBƏÜZ MÖVQEYƏ DOĞRU AKTİV SÜRƏTLƏNMƏ REJİMİ
-      const currentState = this.getState(targetPos);
+      // 12 Girişli şəbəkədən proqnozun alınması
+      const currentState = this.getState(targetPos, obstacles);
       const stateTensor = tf.tensor2d([currentState], [1, currentState.length]);
       const actionTensor = this.model.predict(stateTensor);
       const action = actionTensor.dataSync(); 
@@ -165,21 +178,39 @@ export class DroneAgent {
 
       this.lastAction = [action[0], action[1], action[2]];
 
-      // Süni İntellekt çıxışını tam geometrik əks xəttə məcbur edirik
+      // POTENSİAL SAHƏLƏR METODU (Maneə İtələmə Mexanizmi)
+      let avoidForceX = 0;
+      let avoidForceZ = 0;
+      let avoidForceY = 0;
+
+      obstacles.forEach(obs => {
+        const dist = this.body.position.distanceTo(obs.position);
+        if (dist < 3.5) { // 3.5 metrdən etibarən binanı hiss et və qaç
+          const forceMagnitude = (3.5 - dist) * 12.0;
+          // Binadan kənara doğru itələmə vektoru
+          avoidForceX += ((this.body.position.x - obs.position.x) / dist) * forceMagnitude;
+          avoidForceZ += ((this.body.position.z - obs.position.z) / dist) * forceMagnitude;
+          // Əgər bina çox hündürdürsə, dron yuxarıya doğru da manevr edə bilsin
+          if (this.body.position.y < obs.position.y + 2) {
+            avoidForceY += forceMagnitude * 1.5;
+          }
+        }
+      });
+
       const dx = desiredX - this.body.position.x;
       const dz = desiredZ - this.body.position.z;
       const dY = targetPos.y - this.body.position.y;
       const dist = Math.sqrt(dx*dx + dz*dz);
 
-      let forceX = action[0] * 4;
-      let forceZ = action[2] * 4;
+      let forceX = action[0] * 4 + avoidForceX;
+      let forceZ = action[2] * 4 + avoidForceZ;
 
       if (dist > 0.1) {
-        forceX += (dx / dist) * 7; // Üzbəüz xəttə çəkmə qüvvəsi
+        forceX += (dx / dist) * 7; 
         forceZ += (dz / dist) * 7;
       }
 
-      const forceY = (action[1] + 1.0) * 10.2 + (dY * 3); 
+      const forceY = (action[1] + 1.0) * 10.2 + (dY * 3) + avoidForceY; 
       this.body.applyForce(new CANNON.Vec3(forceX, forceY, forceZ), this.body.position);
 
       if (this.propellers) {
@@ -187,18 +218,20 @@ export class DroneAgent {
       }
     }
 
-    // Vizual sinxronizasiya
     this.mesh.position.copy(this.body.position);
     this.mesh.quaternion.copy(this.body.quaternion);
   }
 
-  calculateReward(targetPos, allDrones) {
+  // Toqquşmadan yayınma və Bina Cəriməsi ilə zənginləşdirilmiş Mükafat Funksiyası
+  calculateReward(targetPos, allDrones, obstacles = []) {
     const currentDistToGoal = this.body.position.distanceTo(new CANNON.Vec3(targetPos.x, targetPos.y, targetPos.z));
     
     let Rg = 0; 
     let Rf = 0; 
     let Rc = 0; 
+    let Ro = 0; // Ssenari B-nin Bina Cəriməsi
 
+    // Hədəf mükafatı
     if (currentDistToGoal < 2.2) {
       const speed = this.body.velocity.length();
       Rg = 400 - (speed * 60); 
@@ -206,26 +239,32 @@ export class DroneAgent {
       Rg = -currentDistToGoal * 25; 
     }
 
+    // BİNALARA TOQQUŞMA CƏRİMƏSİ (Məqsəd 3)
+    obstacles.forEach(obs => {
+      const dist = this.body.position.distanceTo(obs.position);
+      if (dist < 1.8) {
+        Ro -= 900; // Sərt cərimə modelə binalardan yayınmağı mükəmməl öyrədir
+      }
+    });
+
+    // Dronların bir-birinə dəymə cəriməsi
     const otherDrone = allDrones.find(d => d.id !== this.id);
     if (otherDrone) {
       const distToOther = this.body.position.distanceTo(otherDrone.body.position);
-      
-      if (distToOther < 1.5) {
-        Rc = -500; 
-      }
+      if (distToOther < 1.5) Rc = -500; 
 
       const v1 = new THREE.Vector3().subVectors(this.body.position, new CANNON.Vec3(targetPos.x, targetPos.y, targetPos.z)).setY(0).normalize();
       const v2 = new THREE.Vector3().subVectors(otherDrone.body.position, new CANNON.Vec3(targetPos.x, targetPos.y, targetPos.z)).setY(0).normalize();
       const dotProduct = v1.dot(v2); 
 
       if (dotProduct < -0.9) {
-        Rf = 600; // Tam 180 dərəcəlik üzbəüzlük mükafatı maksimuma qaldırıldı
+        Rf = 600; // 180 dərəbəlik üzbəüz qruplaşma mükafatı
       } else {
         Rf = -dotProduct * 300; 
       }
     }
 
-    return Rg + Rf + Rc;
+    return Rg + Rf + Rc + Ro;
   }
 
   async trainStep(state, action, reward) {
