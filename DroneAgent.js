@@ -8,10 +8,12 @@ export class DroneAgent {
     this.id = id;
     this.scene = scene;
     this.lastAction = [0, 0, 0];
-
-    // 1. Ssenari A-dakı Orijinal Saf 3D Mühəndislik Modeli (Tam Qorunub)
-    this.mesh = new THREE.Group();
     
+    // COLLISION LOGGING ÜÇÜN DƏYİŞƏN
+    this.hasCollided = false; 
+
+    // 1. 3D Model
+    this.mesh = new THREE.Group();
     const coreGeo = new THREE.CylinderGeometry(0.25, 0.25, 0.12, 8);
     const coreMat = new THREE.MeshPhongMaterial({ color: color, specular: 0x555555, shininess: 30 });
     const core = new THREE.Mesh(coreGeo, coreMat);
@@ -20,7 +22,6 @@ export class DroneAgent {
 
     const armGeo = new THREE.BoxGeometry(0.9, 0.03, 0.03);
     const armMat = new THREE.MeshPhongMaterial({ color: 0x222222 });
-    
     const arm1 = new THREE.Mesh(armGeo, armMat);
     arm1.rotation.y = Math.PI / 4;
     const arm2 = new THREE.Mesh(armGeo, armMat);
@@ -44,66 +45,72 @@ export class DroneAgent {
       const motor = new THREE.Mesh(motorGeo, motorMat);
       motor.position.set(pos.x, 0.04, pos.z);
       this.mesh.add(motor);
-
       const prop = new THREE.Mesh(propGeo, propMat);
       prop.position.set(pos.x, 0.07, pos.z);
       this.mesh.add(prop);
       this.propellers.push(prop);
     });
-
     scene.add(this.mesh);
 
-    // 2. Cannon.js Fiziki Gövdə Tənzimləmələri
+    // 2. Physics & Collision Listener
     const shape = new CANNON.Box(new CANNON.Vec3(0.3, 0.1, 0.3));
     this.body = new CANNON.Body({ mass: 1.0 });
     this.body.addShape(shape);
     this.body.position.set(startPos.x, startPos.y, startPos.z);
-    
     this.body.angularDamping = 0.99;
     this.body.linearDamping = 0.95; 
     world.addBody(this.body);
 
-    // 3. SSENARİ C ÜÇÜN 15 GİRİŞLİ NEURAL NETWORK (Dinamik Maneələr Əlavə Edildi)
+    // TOQQUŞMA HADİSƏSİNİ YAXALAYAN FUNKSİYA
+    this.body.addEventListener('collide', (e) => {
+      this.hasCollided = true;
+    });
+
+    // 3. Neural Network
     const inputSize = 15; 
     this.model = tf.sequential();
     this.model.add(tf.layers.dense({ units: 48, activation: 'relu', inputShape: [inputSize] }));
     this.model.add(tf.layers.dense({ units: 24, activation: 'relu' }));
     this.model.add(tf.layers.dense({ units: 3, activation: 'tanh' }));
-
     this.optimizer = tf.train.adam(0.004);
     this.model.compile({ optimizer: this.optimizer, loss: 'meanSquaredError' });
   }
 
-  // Yenilənmiş Dövlət Metodu: Ən yaxın STATİK binanı, DİNAMİK maneəni hesablayan sensor (15 input)
+  // YENİ METODLAR: DataLogger üçün lazımdır
+  checkCollision() {
+    if (this.hasCollided) {
+      this.hasCollided = false; // Reset et ki, növbəti dəfə də işləsin
+      return true;
+    }
+    return false;
+  }
+
+  checkSuccess(targetPos) {
+    const distance = this.body.position.distanceTo(new CANNON.Vec3(targetPos.x, targetPos.y, targetPos.z));
+    return distance < 3;
+  }
+
   getState(targetPos, obstacles = [], dynamicObstacles = []) {
     const dx = targetPos.x - this.body.position.x;
     const dy = targetPos.y - this.body.position.y;
     const dz = targetPos.z - this.body.position.z;
 
-    // Ən yaxın STATİK binanı tapmaq
     let closestObs = null;
     let minDist = 9999;
     obstacles.forEach(obs => {
       const dist = this.body.position.distanceTo(obs.position);
-      if (dist < minDist) {
-        minDist = dist;
-        closestObs = obs;
-      }
+      if (dist < minDist) { minDist = dist; closestObs = obs; }
     });
 
     const obsDx = closestObs ? closestObs.position.x - this.body.position.x : 0;
     const obsDy = closestObs ? closestObs.position.y - this.body.position.y : 0;
     const obsDz = closestObs ? closestObs.position.z - this.body.position.z : 0;
 
-    // Ən yaxın DİNAMİK maneəni tapmaq (maşın v ya quş)
     let closestDynObs = null;
     let minDynDist = 9999;
     dynamicObstacles.forEach(dynObs => {
       const dist = this.body.position.distanceTo(dynObs.position);
-      if (dist < minDynDist) {
-        minDynDist = dist;
-        closestDynObs = dynObs;
-      }
+      if (dist < minDynDist) { minDynDist = dist; closestDynObs = dynObs; }
     });
 
     const dynDx = closestDynObs ? closestDynObs.position.x - this.body.position.x : 0;
@@ -114,8 +121,8 @@ export class DroneAgent {
       this.body.position.x, this.body.position.y, this.body.position.z,
       this.body.velocity.x, this.body.velocity.y, this.body.velocity.z,
       dx, dy, dz,
-      obsDx, obsDy, obsDz,        // STATİK maneə məsafəsi (9-11)
-      dynDx, dynDy, dynDz         // DİNAMİK maneə məsafəsi (12-14)
+      obsDx, obsDy, obsDz,
+      dynDx, dynDy, dynDz
     ];
   }
 

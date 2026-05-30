@@ -1,10 +1,68 @@
-// main.js
+/**
+ * ============================================================================
+ * MULTI-AGENT AUTONOMOUS DRONE SIMULATION SYSTEM
+ * ============================================================================
+ * 
+ * Sistem Mimarı:
+ * - Three.js: 3D Renderləmə
+ * - Cannon.js: Fizik Simulyasiyası
+ * - TensorFlow.js: Neyron Şəbəkəsi Eğitmə
+ * - DRL + Potential Field: Hibrid Kontrol Sistemi
+ * 
+ * ============================================================================
+ */
+
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { DroneAgent } from './DroneAgent.js';
 
-// Dinamik Maneələr (Maşınlar və Quşlar) Sinifi
+const DataLogger = {
+  rewards: [],
+  collisions: 0,
+  successes: 0,
+  steps: 0,
+  
+  log(reward, isCollision, isSuccess) {
+    this.rewards.push(reward);
+    if (isCollision) this.collisions++;
+    if (isSuccess) this.successes++;
+    this.steps++;
+  },
+
+  exportData() {
+    const data = {
+      rewards: this.rewards,
+      collisions: this.collisions,
+      successes: this.successes,
+      averageReward: this.rewards.length > 0 ? this.rewards.reduce((a, b) => a + b, 0) / this.rewards.length : 0
+    };
+
+    const jsonString = JSON.stringify(data, null, 2);
+    const blob = new Blob([jsonString], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `simulation_data_${new Date().getTime()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    console.log("Məlumatlar endirildi!");
+  }
+};
+
+window.DataLogger = DataLogger; // Qlobala çıxarırıq
+console.log("DataLogger qlobala uğurla bağlandı.");
+/**
+ * ============================================================================
+ * 1. DINAMIK MANEƏLƏRİN SINIFI (DynamicObstacle)
+ * ============================================================================
+ * 
+ * Məqsəd: Maşın, Quş və Təyyarə kimi hərəkət edən nəsnələrin idarə edilməsi.
+ * Kinematic body (mass=0) istifadə edərək, dronun sensorları tərəfindən 
+ * tanınır lakin simülasiya hesablamalarını artırmaz.
+ */
 class DynamicObstacle {
   constructor(type, startPos, scene, world) {
     this.type = type; // 'car' və ya 'bird'
@@ -501,7 +559,7 @@ window.addEventListener('dblclick', (event) => {
     isTargetSet = true; 
 
     const placementType = event.altKey ? 'ground' : 'flight';
-    console.log(`[Ssenari B - Şəhər] Yeni Hədəf: X=${targetPos.x.toFixed(1)}, Z=${targetPos.z.toFixed(1)}, Y=${targetPos.y.toFixed(1)} (${placementType})`);
+    console.log(`[Şəhər Ssenarisi] Yeni Hədəf: X=${targetPos.x.toFixed(1)}, Z=${targetPos.z.toFixed(1)}, Y=${targetPos.y.toFixed(1)} (${placementType})`);
   }
 });
 
@@ -530,7 +588,6 @@ async function animate() {
   controls.update();
   world.step(timeStep);
   
-  // Dinamik maneələri yenilə
   for (const dynObs of dynamicObstacles) {
     dynObs.update(timeStep);
   }
@@ -542,7 +599,18 @@ async function animate() {
     if (isTargetSet) {
       const currentAction = drone.lastAction;
       const reward = drone.calculateReward(targetPos, drones, obstacleBodies, dynamicObstacles);
+      
+      // Dronun öz öyrənmə prosesi
       await drone.trainStep(oldState, currentAction, reward);
+
+      // --- MƏLUMATI BURADA LOG EDİRİK ---
+      // Dronun toqquşub-toqquşmadığını və hədəfə çatıb-çatmadığını yoxlayırıq
+      // Bu dəyişənlər drone obyektində adətən belə olur:
+      const isCollision = drone.checkCollision(); // Əgər belə bir funksiyan varsa
+      const isSuccess = drone.checkSuccess(targetPos); // Əgər belə bir funksiyan varsa
+
+      DataLogger.log(reward, isCollision, isSuccess);
+      // ----------------------------------
     }
   }
 
